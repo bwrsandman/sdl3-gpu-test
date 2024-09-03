@@ -28,5 +28,5 @@ vertexOut vertexMain(uint vertexID : SV_VertexID)
 [shader("fragment")]
 float4 fragmentMain(vertexOut in) : SV_Target
 {
-    return texture.Sample(sampler, float3(in.uv, in.uv.x * 13)).bgra;
+    return texture.Sample(sampler, float3(in.uv, floor(in.uv.x * 14))).bgra;
 }
