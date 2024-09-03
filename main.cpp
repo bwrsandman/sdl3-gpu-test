@@ -1,7 +1,11 @@
+#include "LNDFile.h"
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gpu.h>
+#include <SDL3/SDL_render.h>
 #include <SDL3/SDL_video.h>
 #include <cstdint>
+#include <fstream>
+#include <ranges>
 #include <string>
 
 #include <SDL3/SDL.h>
@@ -23,10 +27,10 @@
 static SDL_GPUShader *load_shader(SDL_GPUDevice *gpu_device,
                                   SDL_bool is_vertex) {
   SDL_GPUShaderCreateInfo createinfo;
-  createinfo.samplerCount = 0;
+  createinfo.samplerCount = is_vertex ? 0 : 1;
   createinfo.storageBufferCount = 0;
   createinfo.storageTextureCount = 0;
-  createinfo.uniformBufferCount = is_vertex ? 1 : 0;
+  createinfo.uniformBufferCount = 0;
   createinfo.props = 0;
 
   SDL_GPUDriver backend = SDL_GetGPUDriver(gpu_device);
@@ -74,6 +78,16 @@ static SDL_GPUShader *load_shader(SDL_GPUDevice *gpu_device,
 }
 
 int main(int argc, char *argv[]) {
+  openblack::lnd::LNDFile lnd;
+  {
+    std::fstream f("Land1.lnd");
+    auto lnd_result = lnd.ReadFile(f);
+    if (lnd_result != openblack::lnd::LNDResult::Success)
+    {
+      SDL_Log("Failed to read openblack lnd\n");
+      return 1;
+    }
+  }
   {
     const auto n = SDL_GetNumVideoDrivers();
     if (n == 0) {
@@ -147,6 +161,79 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  const auto& lnd_materials = lnd.GetMaterials();
+  SDL_GPUTextureCreateInfo texture_desc;
+  SDL_zero(texture_desc);
+  texture_desc.type = SDL_GPU_TEXTURETYPE_2D_ARRAY;
+  texture_desc.format = SDL_GPU_TEXTUREFORMAT_B5G5R5A1_UNORM;
+  texture_desc.usageFlags = SDL_GPU_TEXTUREUSAGE_SAMPLER_BIT;
+  texture_desc.width = openblack::lnd::LNDMaterial::k_Width;
+  texture_desc.height = openblack::lnd::LNDMaterial::k_Height;
+  texture_desc.layerCountOrDepth = lnd.GetMaterials().size();
+  texture_desc.levelCount = 1;
+  SDL_GPUTexture* texture = SDL_CreateGPUTexture(gpu_device, &texture_desc);
+  if (!texture) {
+    SDL_Log("Failed to create GPU Texture: %s\n", SDL_GetError());
+
+    SDL_DestroyGPUDevice(gpu_device);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 1;
+  }
+  SDL_SetGPUTextureName(gpu_device, texture, "lnd material");
+
+  SDL_GPUTransferBufferCreateInfo tbci;
+  SDL_zero(tbci);
+  tbci.sizeInBytes = (Uint32)(openblack::lnd::LNDMaterial::k_Width * openblack::lnd::LNDMaterial::k_Height * sizeof(openblack::lnd::LNDMaterial::B5G5R5A1));
+  tbci.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+
+  SDL_GPUTransferBuffer *tbuf = SDL_CreateGPUTransferBuffer(gpu_device, &tbci);
+
+  if (tbuf == NULL) {
+      return 1;
+  }
+
+  auto* cmd = SDL_AcquireGPUCommandBuffer(gpu_device);
+  SDL_GPUCopyPass *cpass = SDL_BeginGPUCopyPass(cmd);
+  for (const auto& [i, lnd_material]: std::ranges::enumerate_view(lnd_materials))
+  {
+    uint8_t *output = reinterpret_cast<uint8_t *>(SDL_MapGPUTransferBuffer(gpu_device, tbuf, true));
+    memcpy(output, lnd_material.texels.data(), lnd_material.texels.size() * sizeof(lnd_material.texels[0]));
+
+    SDL_UnmapGPUTransferBuffer(gpu_device, tbuf);
+
+    SDL_GPUTextureTransferInfo transfer_src_desc;
+    SDL_zero(transfer_src_desc);
+    transfer_src_desc.transferBuffer = tbuf;
+    transfer_src_desc.imagePitch = openblack::lnd::LNDMaterial::k_Width;
+    transfer_src_desc.imageHeight = openblack::lnd::LNDMaterial::k_Height;
+
+    SDL_GPUTextureRegion transfer_dest_desc;
+    SDL_zero(transfer_dest_desc);
+    transfer_dest_desc.texture = texture;
+    transfer_dest_desc.layer = i;
+    transfer_dest_desc.w = openblack::lnd::LNDMaterial::k_Width;
+    transfer_dest_desc.h = openblack::lnd::LNDMaterial::k_Height;
+
+    SDL_UploadToGPUTexture(cpass, &transfer_src_desc, &transfer_dest_desc, false);
+  }
+  SDL_EndGPUCopyPass(cpass);
+  SDL_SubmitGPUCommandBuffer(cmd);
+
+  SDL_GPUSamplerCreateInfo sampler_desc;
+  SDL_zero(sampler_desc);
+
+  SDL_GPUSampler* sampler = SDL_CreateGPUSampler(gpu_device, &sampler_desc);
+  if (!sampler) {
+    SDL_Log("Failed to create GPU Sampler: %s\n", SDL_GetError());
+
+    SDL_ReleaseGPUTexture(gpu_device, texture);
+    SDL_DestroyGPUDevice(gpu_device);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 1;
+  }
+
   SDL_GPUShader *vertex_shader = load_shader(gpu_device, true);
   SDL_GPUShader *fragment_shader = load_shader(gpu_device, false);
 
@@ -174,6 +261,8 @@ int main(int argc, char *argv[]) {
   if (!pipeline) {
     SDL_Log("Failed to create GPU pipeline: %s\n", SDL_GetError());
 
+    SDL_ReleaseGPUSampler(gpu_device, sampler);
+    SDL_ReleaseGPUTexture(gpu_device, texture);
     SDL_DestroyGPUDevice(gpu_device);
     SDL_DestroyWindow(window);
     SDL_Quit();
@@ -217,13 +306,19 @@ int main(int argc, char *argv[]) {
 
     auto pass = SDL_BeginGPURenderPass(cmd, &color_attachment, 1, nullptr);
     SDL_BindGPUGraphicsPipeline(pass, pipeline);
-    SDL_DrawGPUPrimitives(pass, 9, 1, 0, 0);
+    SDL_GPUTextureSamplerBinding sampler_binding;
+    sampler_binding.sampler = sampler;
+    sampler_binding.texture = texture;
+    SDL_BindGPUFragmentSamplers(pass, 0, &sampler_binding, 1);
+    SDL_DrawGPUPrimitives(pass, 6, 1, 0, 0);
     SDL_EndGPURenderPass(pass);
 
     /* Submit the command buffer! */
     SDL_SubmitGPUCommandBuffer(cmd);
   }
 
+  SDL_ReleaseGPUSampler(gpu_device, sampler);
+  SDL_ReleaseGPUTexture(gpu_device, texture);
   SDL_ReleaseGPUGraphicsPipeline(gpu_device, pipeline);
   SDL_DestroyGPUDevice(gpu_device);
   SDL_DestroyWindow(window);

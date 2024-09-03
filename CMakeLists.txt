@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.27)
 project(SDL3GPUTest)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(SDL3 REQUIRED)
@@ -113,6 +113,8 @@ else()
   list(APPEND SHADER_HEADERS ${CMAKE_CURRENT_BINARY_DIR}/triangle_frag_spirv.h)
 endif()
 
+add_subdirectory(lnd)
+
 add_executable(sdl3gputest main.cpp ${CMAKE_CURRENT_BINARY_DIR}/triangle_vert_spirv.h ${SHADER_HEADERS})
-target_link_libraries(sdl3gputest PRIVATE SDL3::SDL3)
+target_link_libraries(sdl3gputest PRIVATE SDL3::SDL3 lnd)
 target_include_directories(sdl3gputest PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
